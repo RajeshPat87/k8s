@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  annotations:
+    deprecated.daemonset.template.generation: "2"
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"annotations":{},"labels":{"app":"log-collector"},"name":"log-collector","namespace":"default"},"spec":{"selector":{"matchLabels":{"app":"log-collector"}},"template":{"metadata":{"labels":{"app":"log-collector"}},"spec":{"containers":[{"args":["/bin/sh","-c","while true; do echo 'Collecting logs...'; sleep 30; done"],"image":"busybox:1.28","name":"log-collector"}]}}}}
+  creationTimestamp: "2026-04-22T06:06:08Z"
+  generation: 2
+  labels:
+    app: log-collector
+  name: log-collector
+  namespace: default
+  resourceVersion: "377310"
+  uid: 6f497d2e-d6ee-4cd7-bc6d-67713da8ed27
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: log-collector
+  template:
+    metadata:
+      labels:
+        app: log-collector
+    spec:
+# --- ADD TOLERATIONS HERE ---
+      tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+# ---------------------------
+      containers:
+      - args:
+        - /bin/sh
+        - -c
+        - while true; do echo 'Collecting logs...'; sleep 30; done
+        image: busybox:1.28
+        imagePullPolicy: IfNotPresent
+        name: log-collector
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      nodeSelector:
+        role: worker
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
+status:
+  currentNumberScheduled: 1
+  desiredNumberScheduled: 1
+  numberAvailable: 1
+  numberMisscheduled: 0
+  numberReady: 1
+  observedGeneration: 2
+  updatedNumberScheduled: 1

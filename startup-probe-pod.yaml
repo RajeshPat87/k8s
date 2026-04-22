@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: startup-demo
+spec:
+  containers:
+  - name: slow-app
+    image: nginx
+    startupProbe:
+      httpGet:
+        path: /
+        port: 80
+      # Allow up to 30 seconds (10 tries * 3s) for startup
+      failureThreshold: 10
+      periodSeconds: 3
+    livenessProbe:
+      httpGet:
+        path: /
+        port: 80
+      periodSeconds: 10

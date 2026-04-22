@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: annotated-app
+  namespace: default
+  # Metadata for the Deployment object itself
+  annotations:
+    build-version: "1.2.3"
+    git-commit: "abc123"
+    kubernetes.io/change-cause: "Initial deployment"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: annotated-app
+  template:
+    metadata:
+      labels:
+        app: annotated-app
+      # You can also add annotations to the Pods created by this deployment
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "80"
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25
