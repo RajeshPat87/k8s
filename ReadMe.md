@@ -1,4 +1,4 @@
-# 🚀 100 Kubernetes Assignments: Beginner Hands-on Guide
+# 🚀 Kubernetes Assignments: Beginner/refresh Hands-on Guide
 
 This guide provides detailed, step-by-step execution and verification instructions for the first five Kubernetes assignments.
 
