@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preferred-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: low-latency
+  template:
+    metadata:
+      labels:
+        app: low-latency
+    spec:
+      containers:
+      - name: web
+        image: nginx
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: region
+                operator: In
+                values:
+                - us-east-1
