@@ -411,7 +411,7 @@ Would you like to see how to perform these same steps using a YAML configuration
 
 ---
 
-# 8.lling Updates and Rollbacks – Run Book
+# 8.Rolling Updates and Rollbacks – Run Book
 
 ## Objectives
 - Perform a rolling update on a Deployment
