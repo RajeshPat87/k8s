@@ -1577,3 +1577,421 @@ kubectl scale statefulset stateful-demo --replicas=5
 | **Storage** | Shared or Ephemeral | Individual/Dedicated per Pod |
 | **Scaling** | Parallel/Concurrent | Sequential (Ordered) |
 | **Use Case** | Stateless Apps (Web Servers) | Databases (MySQL, Mongo, Redis) |
+
+-------------------------------------
+
+This runbook provides the necessary YAML manifests and execution steps to master **Node Affinity** and **Anti-Affinity** in Kubernetes.
+
+---
+
+## 🛠️ Prerequisites & Setup
+Before starting, identify your worker nodes to select a target for labeling.
+```bash
+kubectl get nodes
+```
+*Choose one worker node name to replace `<node-name>` in the steps below.*
+
+---
+
+## 1. Label a Node
+We will simulate a node having high-performance storage.
+```bash
+# Apply the label
+kubectl label node <node-name> disktype=ssd
+
+# Verify the label exists
+kubectl get nodes --show-labels | grep disktype
+```
+
+---
+
+## 2. Required Affinity (Hard Constraint)
+The `requiredDuringSchedulingIgnoredDuringExecution` rule acts as a strict filter. If no node matches the criteria, the Pod will remain in a **Pending** state.
+
+### `required-affinity-pod.yaml`
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: affinity-demo
+spec:
+  containers:
+  - name: nginx-ssd
+    image: nginx:latest
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: disktype
+            operator: In
+            values:
+            - ssd
+```
+
+**Action:**
+```bash
+kubectl apply -f required-affinity-pod.yaml
+```
+
+---
+
+## 3. Preferred Affinity (Soft Constraint)
+The `preferredDuringSchedulingIgnoredDuringExecution` rule tells the scheduler to *try* to place the Pod on specific nodes, but to ignore the rule if those nodes are unavailable or over-utilized.
+
+### `preferred-affinity.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preferred-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: low-latency
+  template:
+    metadata:
+      labels:
+        app: low-latency
+    spec:
+      containers:
+      - name: web
+        image: nginx
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: region
+                operator: In
+                values:
+                - us-east-1
+```
+
+**Action:**
+```bash
+kubectl apply -f preferred-affinity.yaml
+```
+
+---
+
+## 4. Pod Anti-Affinity
+This ensures that Pods are spread across different nodes (e.g., for High Availability) by instructing the scheduler not to place a Pod on a node that already runs a Pod with a specific label.
+
+### `anti-affinity.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anti-affinity-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-server
+  template:
+    metadata:
+      labels:
+        app: web-server
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - web-server
+            topologyKey: "kubernetes.io/hostname"
+```
+
+---
+
+## 5. Verification & Testing
+
+### Verify Placement
+Check which nodes the pods landed on:
+```bash
+kubectl get pods -o wide
+```
+
+### Test Failure Mode (Required Affinity)
+If you remove the label and restart the pod, the scheduler will fail to find a valid home for it.
+```bash
+# Remove the label (the '-' at the end deletes it)
+kubectl label node <node-name> disktype-
+
+# Delete the pod so it attempts to reschedule
+kubectl delete pod affinity-demo
+
+# Check status (it should stay Pending)
+kubectl get pod affinity-demo
+kubectl describe pod affinity-demo | grep Events -A 5
+```
+
+---
+
+## 📋 Summary Table of Operators
+
+| Operator | Description |
+| :--- | :--- |
+| **In** | Label value must be in the provided list. |
+| **NotIn** | Label value must NOT be in the provided list. |
+| **Exists** | The label key must exist (value doesn't matter). |
+| **DoesNotExist** | The label key must NOT exist on the node. |
+| **Gt / Lt** | Greater than / Less than (for integer values). |
+
+
+--------------------------------------------
+
+## Runbook: Managing Workloads with Taints and Tolerations
+
+This runbook guides you through the process of controlling Pod placement by "repelling" certain workloads from specific nodes. Think of **Taints** as a "Keep Out" sign on a node, and **Tolerations** as the special key a Pod needs to enter.
+
+---
+
+### 🛠️ Prerequisites
+* A running Kubernetes cluster.
+* `kubectl` configured with cluster-admin access.
+* Completion of the Node Affinity module (preferred).
+
+---
+
+### 📝 Step-by-Step Implementation
+
+#### 1. Apply a Taint to a Node
+We will mark a node as "dedicated" for GPU workloads. This ensures that standard Pods don't accidentally take up resources meant for high-performance tasks.
+
+```bash
+# Replace <node-name> with your actual node name (e.g., minikube-m02)
+kubectl taint node <node-name> dedicated=gpu:NoSchedule
+```
+* **Key**: `dedicated`
+* **Value**: `gpu`
+* **Effect**: `NoSchedule` (New Pods will not be scheduled unless they tolerate this taint).
+
+#### 2. Deploy a Standard Pod (No Toleration)
+Let’s see what happens when a normal Pod tries to find a home.
+
+**Script: `no-toleration-pod.yaml`**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: standard-nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+```
+
+**Action:**
+```bash
+kubectl apply -f no-toleration-pod.yaml
+# Check the status - it will likely land on a different node or stay Pending if no other nodes exist
+kubectl get pods -o wide
+```
+
+#### 3. Add Toleration to a Pod
+Now, let’s create a Pod that is "brave" enough to handle the taint we applied.
+
+**Script: `gpu-toleration-pod.yaml`**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-workload
+spec:
+  containers:
+  - name: cuda-container
+    image: nvidia/cuda:11.0-base
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "gpu"
+    effect: "NoSchedule"
+```
+
+**Action:**
+```bash
+kubectl apply -f gpu-toleration-pod.yaml
+```
+
+#### 4. Verify Placement
+Check if the `gpu-workload` Pod successfully scheduled onto the tainted node.
+
+```bash
+kubectl get pod gpu-workload -o wide
+```
+
+#### 5. Evicting Pods with `NoExecute`
+The `NoExecute` effect is more aggressive; it evicts Pods already running on the node if they don't have a matching toleration.
+
+```bash
+# This will immediately kick off any pod that doesn't tolerate 'maintenance'
+kubectl taint node <node-name> maintenance=true:NoExecute
+```
+
+#### 6. Cleanup (Remove Taint)
+To return the node to a "neutral" state, remove the taint by appending a minus sign (`-`) to the end of the key.
+
+```bash
+kubectl taint node <node-name> dedicated-
+kubectl taint node <node-name> maintenance-
+```
+
+---
+
+### 💡 Key Concepts Summary
+
+| Effect | Behavior |
+| :--- | :--- |
+| **NoSchedule** | New Pods won't be placed here, but existing ones stay. |
+| **PreferNoSchedule** | System tries to avoid the node, but it's not a hard requirement. |
+| **NoExecute** | New Pods won't be placed here AND existing Pods are evicted immediately. |
+
+> [!TIP]
+> **Taints** are applied to **Nodes**.
+> **Tolerations** are applied to **Pods**.
+
+---------------------------------------------
+
+
+## Runbook: Managing Kubernetes Resource Quotas
+
+This guide walks you through setting up and testing **Resource Quotas** to ensure fair resource distribution in a multi-tenant cluster. Resource Quotas are essential for preventing "noisy neighbor" scenarios where one application consumes all available CPU or Memory.
+
+
+
+---
+
+### 1. Prerequisites & Environment Setup
+Before starting, ensure your `kubectl` context is pointing to the correct cluster.
+
+**Create the Test Namespace:**
+```bash
+kubectl create namespace quota-demo
+```
+
+---
+
+### 2. Define the Resource Quota
+You need a YAML manifest to define the hard limits for the namespace. This script limits total CPU, Memory, and the maximum number of Pods.
+
+**File:** `resource-quota.yaml`
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-resources
+  namespace: quota-demo
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    pods: "10"
+```
+
+**Apply the Quota:**
+```bash
+kubectl apply -f resource-quota.yaml -n quota-demo
+```
+
+---
+
+### 3. Monitoring Quota Usage
+To see how much of your "budget" you have spent, use the `describe` command. This is your primary tool for debugging quota issues.
+
+```bash
+kubectl describe quota compute-resources -n quota-demo
+```
+
+> **Note:** Initially, "Used" values will be 0 or near 0 until you deploy resources.
+
+---
+
+### 4. Deploying Within Limits
+When a quota is active, Kubernetes **requires** you to specify requests and limits for every container in your Pods. If you don't, the Pod will be rejected.
+
+**File:** `limited-app.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quota-app
+  namespace: quota-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+```
+
+**Apply the deployment:**
+```bash
+kubectl apply -f limited-app.yaml
+```
+
+---
+
+### 5. Testing Quota Enforcement (Exceeding Limits)
+Now, let's intentionally break the rules by scaling the deployment beyond the pod limit (set to 10).
+
+**Attempt to scale to 15 replicas:**
+```bash
+kubectl scale deployment quota-app --replicas=15 -n quota-demo
+```
+
+**Verify the Failure:**
+Since the quota only allows 10 pods, the ReplicaSet will fail to create the last 5 pods. Check the ReplicaSet events to see the error message:
+
+```bash
+kubectl get rs -n quota-demo
+kubectl describe rs <replica-set-name> -n quota-demo
+```
+
+**Expected Error Message:**
+> `Error creating: pods "quota-app-xxx" is forbidden: exceeded quota: compute-resources, requested: pods=1, used: pods=10, limited: pods=10`
+
+---
+
+### 6. Cleanup
+To avoid leaving orphan resources in your cluster, delete the namespace:
+
+```bash
+kubectl delete namespace quota-demo
+```
+
+---
+
+### Summary Table: Quota Scopes
+| Resource Type | Description |
+| :--- | :--- |
+| **requests.cpu** | The sum of CPU requests across all pods cannot exceed this value. |
+| **limits.memory** | The sum of memory limits across all pods cannot exceed this value. |
+| **pods** | Total count of Pods allowed in the namespace. |
+| **services** | Total number of Services allowed (prevents LoadBalancer cost spikes). |
+  
