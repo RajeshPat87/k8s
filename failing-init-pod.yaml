@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: failing-init
+spec:
+  containers:
+  - name: main-app
+    image: nginx
+  initContainers:
+  - name: init-fail
+    image: busybox
+    command: ['sh', '-c', 'echo "Checking DB connection... Failed!"; exit 1']

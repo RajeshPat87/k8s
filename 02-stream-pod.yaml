@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  containers:
+    - name: app-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          while true; do
+            echo "[app] $(date) - request processed"
+            sleep 3
+          done
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: heavy-app-deployment
+  labels:
+    app: heavy-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: heavy-app
+  template:
+    metadata:
+      labels:
+        app: heavy-app
+    spec:
+      containers:
+      - name: heavy-app
+        image: nginx:latest # Replace with your actual app image
+        ports:
+        - containerPort: 8080
+        
+        # 1. Startup Probe: The "Shield"
+        # Gives the app 5 minutes (30 * 10s) to initialize
+        startupProbe:
+          httpGet:
+            path: /healthz/startup
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 10
+        
+        # 2. Liveness Probe: The "Heartbeat"
+        # Checks if the app is still running after startup succeeds
+        livenessProbe:
+          httpGet:
+            path: /healthz/live
+            port: 8080
+          periodSeconds: 20
+          failureThreshold: 3
+        
+        # 3. Readiness Probe: The "Traffic Cop"
+        # Determines when the app can start receiving traffic
+        readinessProbe:
+          httpGet:
+            path: /healthz/ready
+            port: 8080
+          periodSeconds: 5
+          successThreshold: 1
+          
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "250m"
+            memory: "256Mi"

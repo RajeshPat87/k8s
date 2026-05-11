@@ -1577,3 +1577,2228 @@ kubectl scale statefulset stateful-demo --replicas=5
 | **Storage** | Shared or Ephemeral | Individual/Dedicated per Pod |
 | **Scaling** | Parallel/Concurrent | Sequential (Ordered) |
 | **Use Case** | Stateless Apps (Web Servers) | Databases (MySQL, Mongo, Redis) |
+
+-------------------------------------
+
+This runbook provides the necessary YAML manifests and execution steps to master **Node Affinity** and **Anti-Affinity** in Kubernetes.
+
+---
+
+## 🛠️ Prerequisites & Setup
+Before starting, identify your worker nodes to select a target for labeling.
+```bash
+kubectl get nodes
+```
+*Choose one worker node name to replace `<node-name>` in the steps below.*
+
+---
+
+## 1. Label a Node
+We will simulate a node having high-performance storage.
+```bash
+# Apply the label
+kubectl label node <node-name> disktype=ssd
+
+# Verify the label exists
+kubectl get nodes --show-labels | grep disktype
+```
+
+---
+
+## 2. Required Affinity (Hard Constraint)
+The `requiredDuringSchedulingIgnoredDuringExecution` rule acts as a strict filter. If no node matches the criteria, the Pod will remain in a **Pending** state.
+
+### `required-affinity-pod.yaml`
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: affinity-demo
+spec:
+  containers:
+  - name: nginx-ssd
+    image: nginx:latest
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: disktype
+            operator: In
+            values:
+            - ssd
+```
+
+**Action:**
+```bash
+kubectl apply -f required-affinity-pod.yaml
+```
+
+---
+
+## 3. Preferred Affinity (Soft Constraint)
+The `preferredDuringSchedulingIgnoredDuringExecution` rule tells the scheduler to *try* to place the Pod on specific nodes, but to ignore the rule if those nodes are unavailable or over-utilized.
+
+### `preferred-affinity.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preferred-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: low-latency
+  template:
+    metadata:
+      labels:
+        app: low-latency
+    spec:
+      containers:
+      - name: web
+        image: nginx
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: region
+                operator: In
+                values:
+                - us-east-1
+```
+
+**Action:**
+```bash
+kubectl apply -f preferred-affinity.yaml
+```
+
+---
+
+## 4. Pod Anti-Affinity
+This ensures that Pods are spread across different nodes (e.g., for High Availability) by instructing the scheduler not to place a Pod on a node that already runs a Pod with a specific label.
+
+### `anti-affinity.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anti-affinity-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-server
+  template:
+    metadata:
+      labels:
+        app: web-server
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - web-server
+            topologyKey: "kubernetes.io/hostname"
+```
+
+---
+
+## 5. Verification & Testing
+
+### Verify Placement
+Check which nodes the pods landed on:
+```bash
+kubectl get pods -o wide
+```
+
+### Test Failure Mode (Required Affinity)
+If you remove the label and restart the pod, the scheduler will fail to find a valid home for it.
+```bash
+# Remove the label (the '-' at the end deletes it)
+kubectl label node <node-name> disktype-
+
+# Delete the pod so it attempts to reschedule
+kubectl delete pod affinity-demo
+
+# Check status (it should stay Pending)
+kubectl get pod affinity-demo
+kubectl describe pod affinity-demo | grep Events -A 5
+```
+
+---
+
+## 📋 Summary Table of Operators
+
+| Operator | Description |
+| :--- | :--- |
+| **In** | Label value must be in the provided list. |
+| **NotIn** | Label value must NOT be in the provided list. |
+| **Exists** | The label key must exist (value doesn't matter). |
+| **DoesNotExist** | The label key must NOT exist on the node. |
+| **Gt / Lt** | Greater than / Less than (for integer values). |
+
+
+--------------------------------------------
+
+## Runbook: Managing Workloads with Taints and Tolerations
+
+This runbook guides you through the process of controlling Pod placement by "repelling" certain workloads from specific nodes. Think of **Taints** as a "Keep Out" sign on a node, and **Tolerations** as the special key a Pod needs to enter.
+
+---
+
+### 🛠️ Prerequisites
+* A running Kubernetes cluster.
+* `kubectl` configured with cluster-admin access.
+* Completion of the Node Affinity module (preferred).
+
+---
+
+### 📝 Step-by-Step Implementation
+
+#### 1. Apply a Taint to a Node
+We will mark a node as "dedicated" for GPU workloads. This ensures that standard Pods don't accidentally take up resources meant for high-performance tasks.
+
+```bash
+# Replace <node-name> with your actual node name (e.g., minikube-m02)
+kubectl taint node <node-name> dedicated=gpu:NoSchedule
+```
+* **Key**: `dedicated`
+* **Value**: `gpu`
+* **Effect**: `NoSchedule` (New Pods will not be scheduled unless they tolerate this taint).
+
+#### 2. Deploy a Standard Pod (No Toleration)
+Let’s see what happens when a normal Pod tries to find a home.
+
+**Script: `no-toleration-pod.yaml`**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: standard-nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+```
+
+**Action:**
+```bash
+kubectl apply -f no-toleration-pod.yaml
+# Check the status - it will likely land on a different node or stay Pending if no other nodes exist
+kubectl get pods -o wide
+```
+
+#### 3. Add Toleration to a Pod
+Now, let’s create a Pod that is "brave" enough to handle the taint we applied.
+
+**Script: `gpu-toleration-pod.yaml`**
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-workload
+spec:
+  containers:
+  - name: cuda-container
+    image: nvidia/cuda:11.0-base
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "gpu"
+    effect: "NoSchedule"
+```
+
+**Action:**
+```bash
+kubectl apply -f gpu-toleration-pod.yaml
+```
+
+#### 4. Verify Placement
+Check if the `gpu-workload` Pod successfully scheduled onto the tainted node.
+
+```bash
+kubectl get pod gpu-workload -o wide
+```
+
+#### 5. Evicting Pods with `NoExecute`
+The `NoExecute` effect is more aggressive; it evicts Pods already running on the node if they don't have a matching toleration.
+
+```bash
+# This will immediately kick off any pod that doesn't tolerate 'maintenance'
+kubectl taint node <node-name> maintenance=true:NoExecute
+```
+
+#### 6. Cleanup (Remove Taint)
+To return the node to a "neutral" state, remove the taint by appending a minus sign (`-`) to the end of the key.
+
+```bash
+kubectl taint node <node-name> dedicated-
+kubectl taint node <node-name> maintenance-
+```
+
+---
+
+### 💡 Key Concepts Summary
+
+| Effect | Behavior |
+| :--- | :--- |
+| **NoSchedule** | New Pods won't be placed here, but existing ones stay. |
+| **PreferNoSchedule** | System tries to avoid the node, but it's not a hard requirement. |
+| **NoExecute** | New Pods won't be placed here AND existing Pods are evicted immediately. |
+
+> [!TIP]
+> **Taints** are applied to **Nodes**.
+> **Tolerations** are applied to **Pods**.
+
+---------------------------------------------
+
+
+## Runbook: Managing Kubernetes Resource Quotas
+
+This guide walks you through setting up and testing **Resource Quotas** to ensure fair resource distribution in a multi-tenant cluster. Resource Quotas are essential for preventing "noisy neighbor" scenarios where one application consumes all available CPU or Memory.
+
+
+
+---
+
+### 1. Prerequisites & Environment Setup
+Before starting, ensure your `kubectl` context is pointing to the correct cluster.
+
+**Create the Test Namespace:**
+```bash
+kubectl create namespace quota-demo
+```
+
+---
+
+### 2. Define the Resource Quota
+You need a YAML manifest to define the hard limits for the namespace. This script limits total CPU, Memory, and the maximum number of Pods.
+
+**File:** `resource-quota.yaml`
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-resources
+  namespace: quota-demo
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1Gi
+    limits.cpu: "2"
+    limits.memory: 2Gi
+    pods: "10"
+```
+
+**Apply the Quota:**
+```bash
+kubectl apply -f resource-quota.yaml -n quota-demo
+```
+
+---
+
+### 3. Monitoring Quota Usage
+To see how much of your "budget" you have spent, use the `describe` command. This is your primary tool for debugging quota issues.
+
+```bash
+kubectl describe quota compute-resources -n quota-demo
+```
+
+> **Note:** Initially, "Used" values will be 0 or near 0 until you deploy resources.
+
+---
+
+### 4. Deploying Within Limits
+When a quota is active, Kubernetes **requires** you to specify requests and limits for every container in your Pods. If you don't, the Pod will be rejected.
+
+**File:** `limited-app.yaml`
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quota-app
+  namespace: quota-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+```
+
+**Apply the deployment:**
+```bash
+kubectl apply -f limited-app.yaml
+```
+
+---
+
+### 5. Testing Quota Enforcement (Exceeding Limits)
+Now, let's intentionally break the rules by scaling the deployment beyond the pod limit (set to 10).
+
+**Attempt to scale to 15 replicas:**
+```bash
+kubectl scale deployment quota-app --replicas=15 -n quota-demo
+```
+
+**Verify the Failure:**
+Since the quota only allows 10 pods, the ReplicaSet will fail to create the last 5 pods. Check the ReplicaSet events to see the error message:
+
+```bash
+kubectl get rs -n quota-demo
+kubectl describe rs <replica-set-name> -n quota-demo
+```
+
+**Expected Error Message:**
+> `Error creating: pods "quota-app-xxx" is forbidden: exceeded quota: compute-resources, requested: pods=1, used: pods=10, limited: pods=10`
+
+---
+
+### 6. Cleanup
+To avoid leaving orphan resources in your cluster, delete the namespace:
+
+```bash
+kubectl delete namespace quota-demo
+```
+
+---
+
+### Summary Table: Quota Scopes
+| Resource Type | Description |
+| :--- | :--- |
+| **requests.cpu** | The sum of CPU requests across all pods cannot exceed this value. |
+| **limits.memory** | The sum of memory limits across all pods cannot exceed this value. |
+| **pods** | Total count of Pods allowed in the namespace. |
+| **services** | Total number of Services allowed (prevents LoadBalancer cost spikes). |
+
+--------------------------------------------
+
+This is the complete, consolidated runbook for **Kubernetes Playbook #21: Init Containers**. It combines the conceptual notes, the successful implementation, the failure simulation, and the recovery steps into one structured document.
+
+---
+
+# 📔 Playbook #21: Init Containers in Kubernetes
+**Level:** Beginner  
+**Focus:** Lifecycle Management & Pre-runtime Logic
+
+---
+
+## 🏗️ 1. Concept Overview
+**Init Containers** are specialized containers that run **before** the app containers in a Pod. They are used to separate setup logic from application code.
+
+### Key Rules
+*   **Sequential Execution:** They run one after another. Container B won't start until Container A finishes successfully.
+*   **Blocking Nature:** The main application container will **never** start if an init container fails.
+*   **Immutability:** Once a Pod is created, you cannot easily change the `initContainers` field; you must delete and recreate the Pod.
+
+
+
+---
+
+## 🛠️ 2. Step-by-Step Implementation
+
+### Step 1: Create the Standard Init Pod
+This YAML creates a shared volume where the init container writes data for the main Nginx container to use.
+
+**File:** `init-pod.yaml`
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-demo
+spec:
+  volumes:
+  - name: shared-data
+    emptyDir: {}
+  containers:
+  - name: main-container
+    image: nginx
+    volumeMounts:
+    - name: shared-data
+      mountPath: /usr/share/nginx/html
+  initContainers:
+  - name: init-config
+    image: busybox
+    command: ['sh', '-c', "echo 'Init Complete!' > /work-dir/index.html"]
+    volumeMounts:
+    - name: shared-data
+      mountPath: /work-dir
+```
+
+**Run:**
+```bash
+kubectl apply -f init-pod.yaml
+```
+
+### Steps 2-4: Monitor & Verify
+```bash
+# 2. Watch the phase change from Init:0/1 to Running
+kubectl get pod init-demo -w
+
+# 3. Check what the init container did
+kubectl logs init-demo -c init-config
+
+# 4. Verify the main container can see the data
+kubectl exec -it init-demo -- cat /usr/share/nginx/html/index.html
+```
+
+---
+
+## ⚠️ 3. Handling Failures (The "Fail & Fix" Cycle)
+
+### Step 5: Simulate Init Failure
+We create a Pod where the init container explicitly exits with an error code.
+
+**File:** `failing-init-pod.yaml`
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: failing-init
+spec:
+  containers:
+  - name: main-app
+    image: nginx
+  initContainers:
+  - name: init-fail
+    image: busybox
+    command: ['sh', '-c', 'echo "Checking DB connection... Failed!"; exit 1']
+```
+
+**Run & Observe:**
+```bash
+kubectl apply -f failing-init-pod.yaml
+kubectl get pod failing-init
+# STATUS will show: Init:CrashLoopBackOff
+
+# Describe to see the "Back-off" events
+kubectl describe pod failing-init
+```
+
+### Step 6: Fix and Redeploy
+Since we cannot edit the existing Pod's command, we delete and apply a corrected version.
+
+**File:** `fixed-init-pod.yaml`
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fixed-init
+spec:
+  containers:
+  - name: main-app
+    image: nginx
+  initContainers:
+  - name: init-success
+    image: busybox
+    command: ['sh', '-c', 'echo "Checking DB connection... Success!"; exit 0']
+```
+
+**Run:**
+```bash
+kubectl delete pod failing-init
+kubectl apply -f fixed-init-pod.yaml
+```
+
+---
+
+## 📝 4. Final Summary Notes
+
+| Feature | Details |
+| :--- | :--- |
+| **Termination** | Init containers must exit/terminate. They cannot be long-running like the app. |
+| **Status Codes** | `Exit 0` is required to move to the next stage. |
+| **Use Case 1** | **Wait-for:** Use a loop to wait for a Database Service to be "Ready". |
+| **Use Case 2** | **Security:** Download secrets or certificates into a volume without putting the tools in the main image. |
+| **Logging** | Always use `kubectl logs <pod> -c <init-container-name>` to debug. |
+
+---
+✅ **Conclusion:** Init Containers allow for a "clean" application image by offloading environment preparation to a separate, temporary container.
+
+-------------------------------------------------------
+
+
+Here is the complete, consolidated runbook and set of technical notes for **Module #22: Kubernetes Events and Debugging**. 
+
+This guide is designed to be used as a "cheat sheet" for both learning and practical on-the-job troubleshooting.
+
+---
+
+## 📘 Technical Notes: Kubernetes Events
+Events are not just logs; they are **API objects** within Kubernetes that record state changes and errors.
+
+### Why Events Matter
+*   **Audit Trail:** They explain *why* a Pod is stuck in `Pending` or `ImagePullBackOff`.
+*   **Lifecycle Tracking:** They show when a node was added, when a container started, and when the scheduler made a decision.
+*   **Ephemeral Nature:** By default, events are deleted after **1 hour** to prevent overloading the etcd database.
+
+### The Lifecycle of a Pod Failure
+
+
+1.  **Pending:** The Scheduler cannot find a node (check `FailedScheduling`).
+2.  **ContainerCreating:** Issues with pulling images or mounting volumes (check `FailedMount` or `ErrImagePull`).
+3.  **Running (CrashLoop):** The app starts but crashes (check `BackOff`).
+4.  **Terminated:** The app was killed by the system (check `OOMKilled`).
+
+---
+
+## 🛠 Runbook: Troubleshooting Kubernetes
+Follow these steps to diagnose and resolve common cluster issues.
+
+### Phase 1: Generating the "Lab" Environment
+To practice debugging, create these two manifests on your local machine.
+
+**File:** `bad-pod.yaml`
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod
+spec:
+  containers:
+  - name: error-container
+    image: doesnotexist:latest
+```
+
+**File:** `oom-pod.yaml`
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-pod
+spec:
+  containers:
+  - name: stress-container
+    image: polinux/stress
+    resources:
+      limits:
+        memory: "50Mi"
+    command: ["stress"]
+    args: ["--vm", "1", "--vm-bytes", "150M", "--vm-hang", "1"]
+```
+
+---
+
+### Phase 2: Execution & Investigation
+
+#### 1. Deployment
+```bash
+kubectl apply -f bad-pod.yaml
+kubectl apply -f oom-pod.yaml
+```
+
+#### 2. Deep Dive with Describe
+When a specific pod fails, this is your first line of defense.
+```bash
+kubectl describe pod bad-pod
+```
+*   **Action:** Scroll to the bottom. Look for `Pulling`, then `Failed`. The message will tell you exactly which registry it couldn't find.
+
+#### 3. Analyzing Memory Issues (OOM)
+If a pod disappears or restarts without a clear error, check the termination state.
+```bash
+kubectl get pod oom-pod -o yaml | grep -A 5 "lastState"
+```
+*   **Evidence:** Look for `reason: OOMKilled`. This confirms your resource limits are too low for the application's needs.
+
+#### 4. The "Global View" Debugging
+If multiple things are breaking at once, use field selectors to cut through the noise.
+```bash
+# Get only Warning events across all namespaces
+kubectl get events -A --field-selector type=Warning
+
+# Sort by time to see the most recent catastrophic events
+kubectl get events --sort-by='.lastTimestamp'
+```
+
+---
+
+### Phase 3: Resolution Summary
+| Symptom | Event Reason | Resolution |
+| :--- | :--- | :--- |
+| **ImagePullBackOff** | `Failed` / `InspectFailed` | Fix image name or add `imagePullSecrets`. |
+| **Pod stuck in Pending** | `FailedScheduling` | Check node capacity; check `Taints` and `Tolerations`. |
+| **CrashLoopBackOff** | `BackOff` | Check application logs: `kubectl logs <pod>`. |
+| **OOMKilled** | `Evicted` or `OOMKilled` | Increase `resources.limits.memory` in the YAML. |
+
+---
+
+### ✅ Conclusion
+Debugging in Kubernetes is the art of **matching symptoms to events**. If the pod isn't doing what you expect, the answer is almost always hidden in `kubectl describe` or the event stream.
+
+> **Note:** For real-world production environments, consider using a tool like **Kubewatch** or **EventRouter** to forward these events to Slack or an ELK stack before they expire after 60 minutes.
+
+
+----------------------------------------------
+
+## Runbook: Deploying Applications with Helm
+
+**Project ID:** #23
+
+**Level:** Beginner
+
+**Focus:** Package Management for Kubernetes
+
+---
+
+### 📘 Overview & Concepts
+
+Helm is essentially the **"App Store"** for Kubernetes. It allows you to manage complex applications through **Charts**, which are packages of pre-configured Kubernetes resources. Instead of managing dozens of individual YAML files for a single app, you use Helm to deploy everything as a single unit.
+
+**Key Terminology:**
+
+* **Chart:** A bundle of information necessary to create an instance of a Kubernetes application.
+* **Repo:** A place where charts can be collected and shared (like GitHub for Helm).
+* **Release:** An instance of a chart running in a Kubernetes cluster.
+
+---
+
+### 🛠 Prerequisites
+
+Before starting, ensure your environment meets these requirements:
+
+* **Kubernetes Cluster:** A running cluster (Minikube, Kind, or Cloud-based).
+* **kubectl CLI:** Installed and configured to communicate with your cluster.
+* **Permissions:** Sufficient RBAC permissions to create deployments and services.
+
+---
+
+### 🚀 Execution Steps
+
+#### 1. Install Helm
+
+The following command fetches the official installation script and executes it locally.
+
+```bash
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+```
+
+*Note: Always verify the version after installation using `helm version`.*
+
+#### 2. Configure Repositories
+
+Helm doesn't come with charts built-in. You must point it to a repository. Bitnami is the industry standard for well-maintained, secure charts.
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+```
+
+#### 3. Locate Your Application
+
+Search the repository to ensure the package exists and to see the available versions.
+
+```bash
+helm search repo bitnami/nginx
+
+```
+
+#### 4. Deploy (The "Install" Phase)
+
+Deploy the Nginx web server. The name `my-nginx` is your **Release Name**, which allows you to track this specific instance.
+
+```bash
+helm install my-nginx bitnami/nginx
+
+```
+
+#### 5. Verification
+
+Check that Helm recognizes the release and that Kubernetes has spun up the physical Pods.
+
+```bash
+helm list
+kubectl get pods
+
+```
+
+#### 6. Cleanup
+
+To avoid resource waste, uninstall the release. This removes all associated services, deployments, and pods created by the chart.
+
+```bash
+helm uninstall my-nginx
+
+```
+
+---
+
+### 📝 Post-Deployment Notes
+
+* **Customization:** While this runbook uses default settings, Helm’s power lies in the `values.yaml` file. You can override settings (like port numbers or replica counts) using the `--set` flag or by providing your own YAML file.
+* **Idempotency:** Helm allows you to run `helm upgrade --install`, which will either install the chart if it’s missing or update it if it already exists.
+* **Rollbacks:** If a deployment goes south, Helm keeps a history. You can revert to a previous working state using `helm rollback <release-name> <revision-number>`.
+
+> **Pro-Tip:** Use `helm status my-nginx` to see the specific instructions (like IP addresses or passwords) generated by the chart author after installation.
+  
+-----------------------------------------------------
+
+## 🛡️ Kubernetes Network Policy Lab: Zero-Trust Microsegmentation
+
+This lab covers the transition from a default "open" network to a secured "Zero-Trust" environment. These notes are structured for production readiness, covering basic, intermediate, and troubleshooting use cases.
+
+---
+
+### 📋 Lab Environment Context
+
+* **Cluster Type:** AKS with Azure NPM (`network-policy: azure`)
+* **Namespace:** `default` (or your chosen lab namespace)
+* **Logic:** Ingress rules are **additive**. If a pod is targeted by a policy, it enters "Isolation Mode."
+
+---
+
+### 🛠️ Phase 1: The Setup
+
+Deploy three pods to test different communication paths: a **Frontend**, a **Backend**, and an **Unauthorized** pod.
+
+```bash
+# 1. Deploy pods with specific labels
+kubectl run frontend --image=busybox --labels="tier=frontend" -- sleep 3600
+kubectl run backend --image=nginx --labels="tier=backend"
+kubectl run unauthorized --image=busybox --labels="tier=other" -- sleep 3600
+
+# 2. Expose Backend via ClusterIP Service
+kubectl expose pod backend --port=80 --name=backend
+
+```
+
+---
+
+### 🚀 Phase 2: Use Cases
+
+#### Use Case 1: The "Security Baseline" (Default Deny)
+
+**Objective:** Block all lateral movement by default. This ensures that no pod can talk to another unless explicitly permitted.
+
+**`01-default-deny.yaml`**
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {} # Targets ALL pods in the namespace
+  policyTypes:
+  - Ingress
+
+```
+
+* **Verification:** `kubectl exec frontend -- wget -qO- --timeout=2 http://backend`
+* **Result:** `timed out` (Correct).
+
+#### Use Case 2: "Service-to-Service" (Allow Specific Tier)
+
+**Objective:** Allow the Frontend to access the Backend, but keep the Unauthorized pod blocked.
+
+**`02-allow-frontend.yaml`**
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend # The "Target"
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          tier: frontend # The "Source"
+    ports:
+    - protocol: TCP
+      port: 80
+
+```
+
+* **Verification (Frontend):** `kubectl exec frontend -- wget -qO- --timeout=2 http://backend` -> **Success (200 OK)**.
+* **Verification (Unauthorized):** `kubectl exec unauthorized -- wget -qO- --timeout=2 http://backend` -> **Timed Out**.
+
+#### Use Case 3: "Namespace Isolation"
+
+**Objective:** Allow traffic only from pods within a specific namespace (e.g., allow `monitoring` namespace to scrape `app` namespace).
+
+**`03-namespace-allow.yaml`**
+
+```yaml
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+
+```
+
+#### Use Case 4: "Egress Control" (External API Access)
+
+**Objective:** Prevent pods from calling the public internet, except for a specific IP (e.g., an external database).
+
+**`04-egress-limit.yaml`**
+
+```yaml
+spec:
+  podSelector:
+    matchLabels:
+      tier: frontend
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 20.30.40.50/32
+    ports:
+    - protocol: TCP
+      port: 443
+
+```
+
+---
+
+### 📝 Expert Troubleshooting & Best Practices
+
+| Issue | Root Cause | Verification Command |
+| --- | --- | --- |
+| **"Bad Address"** | DNS Failure (UDP 53) | `kubectl exec ... -- nslookup google.com` |
+| **Policy Ignored** | CNI doesn't support NetPol | `az aks show ... --query networkProfile.networkPolicy` |
+| **Traffic Still Flows** | Label Mismatch | `kubectl get pods --show-labels` |
+| **Everything Breaks** | Egress Deny-All applied | Check if `policyTypes` includes `Egress` without rules. |
+
+---
+
+### 💡 Key Design Principles for your Notes
+
+1. **Implicit Deny:** Once a pod is selected by a policy, it is "isolated." Unselected pods remain "non-isolated" (open) unless a `Default Deny` exists.
+2. **DNS is Egress:** If you implement a global **Egress Deny**, you **MUST** add a rule to allow traffic to `kube-system` on Port 53 (UDP), otherwise pods cannot resolve service names.
+3. **Namespace Labels:** Modern K8s automatically labels namespaces with `kubernetes.io/metadata.name`. Use this for easy `namespaceSelector` rules.
+4. **Blast Radius:** By isolating tiers, a compromised Frontend pod cannot be used to port-scan your internal DB or other internal services.
+
+---
+
+### ✅ Conclusion
+
+By moving from the first cluster (`none`) to the second cluster (`azure`), you observed that Network Policy is a **software-defined firewall** managed by the CNI/NPM agent. Without that agent, the YAML is just metadata; with it, it is a powerful security enforcement tool.
+
+
+-----------------------------------------------------------------
+
+## Runbook #25: Local Access via `kubectl port-forward`
+
+This runbook provides a streamlined guide for using port-forwarding to securely access internal Kubernetes resources from your local machine.
+
+---
+
+### 📋 Overview & Purpose
+
+`kubectl port-forward` allows you to bridge a local port on your workstation to a port on a specific Pod or Service within your cluster. It is primarily used for **debugging**, **testing**, and **database administration** without the need to configure complex Ingress rules or expensive LoadBalancers.
+
+### 🛠 Prerequisites
+
+* A running Kubernetes cluster.
+* `kubectl` CLI configured and authenticated.
+* At least one running Pod or Service to target.
+
+---
+
+### 🚀 Step-by-Step Execution
+
+#### 1. Deploy the Demo Application
+
+Create a simple Nginx deployment and expose it via an internal `ClusterIP` service (this service is not accessible from the public internet).
+
+```bash
+kubectl create deployment pf-demo --image=nginx
+kubectl expose deployment pf-demo --port=80
+
+```
+
+#### 2. Forward to a Pod
+
+Map your local port **8080** to the deployment's port **80**. Kubernetes will automatically select a pod managed by the deployment.
+
+```bash
+kubectl port-forward deployment/pf-demo 8080:80
+
+```
+
+> **Note:** The process will stay active in your terminal. If you close the terminal or press `Ctrl+C`, the connection will drop.
+
+#### 3. Verify Connectivity
+
+While the forward is active, open a new terminal tab or a web browser:
+
+* **Browser:** Navigate to `http://localhost:8080`
+* **Terminal:**
+```bash
+curl http://localhost:8080
+
+```
+
+
+
+#### 4. Forward to a Service
+
+Alternatively, you can forward traffic to the Service level. This is often preferred as it abstracts away specific pod names.
+
+```bash
+kubectl port-forward svc/pf-demo 9090:80
+
+```
+
+#### 5. Manage as a Background Process
+
+To keep your terminal free while maintaining the connection, run the command in the background.
+
+```bash
+kubectl port-forward svc/pf-demo 9090:80 &
+
+```
+
+#### 6. Terminate the Connection
+
+To stop a background port-forwarding session:
+
+```bash
+# To kill the most recent background job
+kill %1
+
+```
+
+---
+
+### 📝 Strategic Notes
+
+| Feature | `port-forward` | `LoadBalancer` / `Ingress` |
+| --- | --- | --- |
+| **Primary Use** | Temporary debugging / Dev | Production traffic |
+| **Access** | Local machine only | Public or Private Network |
+| **Security** | High (uses kubeconfig auth) | Depends on firewall/IAM |
+| **Cost** | Free | Usually incurs cloud provider fees |
+
+#### ⚠️ Critical Reminders
+
+* **Security:** `port-forward` is only as secure as your `kubeconfig` file. Never leave sensitive ports forwarded on shared machines.
+* **Stability:** This is a tunnel, not a permanent networking solution. It may timeout or disconnect during network hiccups.
+* **Targeting:** If you forward to a **Deployment**, `kubectl` will pick one pod. If that pod dies, the port-forward session usually terminates. Forwarding to a **Service** provides slightly more resilience.
+
+```
+
+```
+-------------------------------------------------
+
+## Kubernetes Context Management: Beginner’s Guide & Runbook
+
+Managing multiple Kubernetes clusters doesn't have to feel like juggling chainsaws. By mastering the `kubeconfig` file, you can move between environments (Dev, Staging, Prod) with confidence and speed.
+
+---
+
+### 🧠 Key Concepts: The "Kubeconfig" Hierarchy
+
+A `kubeconfig` file is essentially a YAML map that tells `kubectl` how to find and authenticate with your clusters. It is built on three main pillars:
+
+1. **Clusters:** The API server URL and certificate authority (Where am I going?).
+2. **Users:** Your credentials—tokens, passwords, or client certificates (Who am I?).
+3. **Contexts:** A named shortcut that links a **User** to a **Cluster** and optionally sets a default **Namespace** (How am I connecting?).
+
+---
+
+### 🛠 Practical Runbook
+
+Follow these steps to audit and manage your environments.
+
+#### 1. Audit Your Current Setup
+
+Before changing anything, see what clusters your machine currently "knows" about.
+
+* **View Full Config:** `kubectl config view`
+* **List All Contexts:** `kubectl config get-contexts`
+> *Note: The asterisk (*) indicates your currently active context.*
+
+
+
+#### 2. Switching Environments
+
+Moving from one cluster to another is the most common task.
+
+* **Switch Context:**
+```bash
+kubectl config use-context <context-name>
+
+```
+
+
+
+#### 3. Namespace Optimization
+
+Stop typing `-n production` every time. You can "pin" a context to a specific namespace.
+
+* **Set Default Namespace:**
+
+```bash
+    kubectl config set-context --current --namespace=<your-namespace>
+    ```
+
+#### 4. Merging Multiple Configs
+If a cloud provider gives you a new `.yaml` file, don't just replace your old config. Merge them into one master file.
+*   **The Merge Command:**
+    
+```bash
+    KUBECONFIG=~/.kube/config:~/new-cluster.yaml kubectl config view --flatten > ~/.kube/config_new
+    mv ~/.kube/config_new ~/.kube/config
+    ```
+
+---
+
+### 💡 Pro-Tips for Efficiency
+
+#### 🚀 Use Helper Tools
+Manual `kubectl` commands can be wordy. Most pros use these lightweight wrappers:
+*   **kubectx:** Switch contexts instantly.
+*   **kubens:** Switch namespaces instantly.
+*   **Installation:** `brew install kubectx`
+
+#### 🛡 Context Hygiene (Best Practices)
+*   **Distinct Names:** Rename your contexts to something readable (e.g., `prod-us-east` instead of `gke_project-123_us-east1-a_cluster-1`).
+*   **The "Golden Rule":** Always run `kubectl config current-context` before running a `delete` or `apply` command to ensure you aren't accidentally hitting production.
+*   **Shell Prompt:** Use a tool like **Starship** or **Oh My Zsh** to display your current K8s context directly in your terminal prompt.
+
+---
+
+> **Summary:** Your `kubeconfig` is the "address book" for your infrastructure. Keep it organized, use contexts to define your boundaries, and leverage tools like `kubectx` to stay fast and safe.
+
+```
+
+
+------------------------------------------------
+
+## Runbook #27: Deploying Applications with YAML Manifests
+
+**Level:** Beginner
+
+**Focus:** Multi-resource Management & Declarative Workflows
+
+This runbook covers the transition from imperative commands to **declarative manifests**, allowing you to manage complex application stacks as a single unit of truth.
+
+---
+
+### 📋 Prerequisites
+
+* **Kubernetes Cluster:** Access to a running cluster (Minikube, Kind, or Cloud).
+* **kubectl CLI:** Installed and configured.
+* **YAML Basics:** Understanding of key-value pairs, lists, and indentation.
+
+---
+
+### 🛠 Step-by-Step Instructions
+
+#### 1. Construct the Multi-Resource YAML
+
+In Kubernetes, you can stack multiple objects in a single file using the `---` (three dashes) document separator. This ensures the API processes them as distinct entities.
+
+**Example: `full-app.yaml**`
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  api-url: "http://api.production.com"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.21
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-service
+spec:
+  selector:
+    app: web-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+
+```
+
+#### 2. Perform a Dry Run
+
+Before committing changes to the cluster, validate the syntax and permissions.
+
+* **Command:** `kubectl apply -f full-app.yaml --dry-run=client`
+* **Why:** It catches "fat-finger" typos or schema errors without actually creating resources.
+
+#### 3. Apply the Manifest
+
+Apply the entire stack in one go.
+
+* **Command:** `kubectl apply -f full-app.yaml`
+* **Note:** `kubectl` is smart enough to handle the resources in order (usually creating ConfigMaps before the Pods that need them).
+
+#### 4. Verify the Deployment
+
+Check that all components are running and correctly labeled.
+
+* **Command:** `kubectl get all -l app=web-app`
+* **Tip:** Using labels (`-l`) is the most efficient way to filter a multi-resource stack.
+
+#### 5. Bulk Management (Directory Apply)
+
+If your app has many files, you don’t need to list them individually.
+
+* **Command:** `kubectl apply -f ./manifests/`
+* **Effect:** This applies every `.yaml` and `.yml` file found within the specified folder.
+
+#### 6. Clean Up
+
+To remove every resource defined in your file:
+
+* **Command:** `kubectl delete -f full-app.yaml`
+
+---
+
+### 📝 Key Technical Notes
+
+| Concept | Description |
+| --- | --- |
+| **Document Separator (`---`)** | Required to define multiple YAML documents in a single physical file. |
+| **Declarative vs Imperative** | **Declarative** (Apply) tells K8s what the final state should look like; **Imperative** (Run/Create) tells K8s what specific action to take right now. |
+| **Idempotency** | Running `kubectl apply` multiple times with the same file will result in "unchanged" status if the cluster matches the file. |
+
+> **Pro-Tip:** Always keep your YAML manifests in a Git repository. This practice, known as **GitOps**, ensures that your infrastructure is versioned and easily reproducible if the cluster fails.
+
+---
+
+### ✅ Conclusion
+
+By mastering multi-resource manifests, you have moved away from manual "one-off" commands. You can now define entire environments—from databases to frontends—in a single, shareable format that serves as the "Source of Truth" for your infrastructure.
+
+
+----------------------
+
+
+---
+
+## 📘 Runbook: Implementing Startup Probes for Slow-Starting Apps
+
+### 1. Assessment Phase
+
+Before adding the probe, determine the "Grace Window."
+
+* **Formula:** $T_{startup} \times 1.25 = \text{Total Buffer}$
+* **Configuration:**
+* `periodSeconds`: How often to check (default 10s).
+* `failureThreshold`: $(\text{Total Buffer} / \text{periodSeconds})$.
+
+
+
+### 2. Implementation Template (YAML)
+
+Apply this pattern to bypass liveness/readiness during the boot sequence:
+
+```yaml
+spec:
+  containers:
+  - name: heavy-app
+    startupProbe:
+      httpGet:
+        path: /healthz/startup
+        port: 8080
+      failureThreshold: 30 # Allows 5 mins if period is 10s
+      periodSeconds: 10
+    livenessProbe:
+      httpGet:
+        path: /healthz/live
+        port: 8080
+      periodSeconds: 20
+    readinessProbe:
+      httpGet:
+        path: /healthz/ready
+        port: 8080
+      periodSeconds: 5
+
+```
+
+### 3. Verification Commands
+
+* **Monitor the Hand-off:**
+`kubectl get po -w`
+*(Look for the container to become 1/1 READY only after the startup window)*
+* **Audit Probe Timing:**
+`kubectl describe po [pod-name] | grep -i "probes"`
+
+---
+
+## 📝 Technical Notes: The "SRE Cheat Sheet"
+
+### 🛡️ The Startup vs. Liveness Conflict
+
+* **The Problem:** Without a Startup probe, the Liveness probe starts ticking at $T=0$. If your Java/Spring Boot app takes 60s to start, and Liveness `failureThreshold` is 3, the pod restarts at 30s.
+* **The Fix:** Startup probes **block** Liveness and Readiness probes. They are the only probe active during the boot phase. Once it succeeds **once**, it disappears until the container restarts.
+
+### ⚡ Troubleshooting "CrashLoopBackOff"
+
+If a pod is restarting despite having a Startup probe:
+
+1. **Check Events:** `kubectl get events --sort-by=.lastTimestamp`
+* *Message:* "Startup probe failed" -> Increase `failureThreshold`.
+* *Message:* "Liveness probe failed" -> The app started but crashed *after* initialization.
+
+
+2. **Resource Throttling:** Ensure the container has enough CPU `requests`. If CPU is throttled during startup, the probe might timeout even if the logic is correct.
+
+### 🚀 Best Practices for Senior DevOps
+
+* **Use the same endpoint?** It’s common to use the same `/healthz` for all three, but use different thresholds.
+* **Exec vs. HTTP:** For legacy apps without an HTTP endpoint, use a Marker File:
+`exec: command: ["cat", "/tmp/initialized"]`.
+* **GKE/AKS Specifics:** Ensure your Cloud Load Balancer (Ingress) timeout is longer than your Readiness probe window, or you'll see 502 errors during rolling updates.
+
+---
+
+-----------------------------
+
+## Kubernetes Service Accounts: Exercise #29
+
+Based on the instructions provided, here are the YAML manifests required to complete the steps. These define the custom Service Account, the Pod that utilizes it, and a secured Pod with token mounting disabled.
+
+---
+
+### 1. Service Account Manifest
+
+While you can create this via CLI, having the YAML is best practice for version control.
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-sa
+  namespace: default
+
+```
+
+### 2. Pod with Custom Service Account (`sa-pod.yaml`)
+
+This Pod references the `app-sa` created in step 2.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sa-pod
+  namespace: default
+spec:
+  serviceAccountName: app-sa
+  containers:
+  - name: nginx
+    image: nginx:latest
+
+```
+
+### 3. Pod with Disabled Token Auto-mount (`no-token-pod.yaml`)
+
+For enhanced security (Step 5), this configuration prevents the API token from being automatically injected into the container.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-token-pod
+  namespace: default
+spec:
+  automountServiceAccountToken: false
+  containers:
+  - name: nginx
+    image: nginx:latest
+
+```
+
+---
+
+### 📝 Implementation Notes
+
+* **Token Path:** When you run the `exec` command in Step 4, the token is located at `/var/run/secrets/kubernetes.io/serviceaccount/token`. This is a projected volume managed by the Kubelet.
+* **Security Context:** By default, every namespace has a `default` Service Account. If you don't specify `serviceAccountName`, Kubernetes assigns this default one. In production, always create a dedicated SA with **Least Privilege** as shown in Step 6.
+* **RBAC Binding:** The RoleBinding in Step 6 connects your `app-sa` to the `view` ClusterRole, allowing the Pod to "read" resources within the `default` namespace without granting administrative power.
+
+---
+
+### Summary Table: Commands Reference
+
+| Action | Command |
+| --- | --- |
+| **List SAs** | `kubectl get sa` |
+| **Create SA** | `kubectl create sa app-sa` |
+| **Check Token** | `kubectl describe sa app-sa` |
+| **Apply Pod** | `kubectl apply -f sa-pod.yaml` |
+| **Verify RBAC** | `kubectl auth can-i list pods --as=system:serviceaccount:default:app-sa` |
+
+
+
+--------------------------
+
+## #30 — Complete Runbook + YAML Lab
+### Viewing and Streaming Pod Logs | Beginner Level
+
+---
+
+## 🎯 Objectives
+- Retrieve logs from single and multi-container pods
+- Stream live logs
+- Follow logs from a crashed previous container instance
+
+---
+
+## Prerequisites
+- `kubectl` CLI configured and connected to a cluster
+- A running Pod or Deployment to target
+- Basic understanding of Kubernetes Pod lifecycle
+
+---
+
+## Core Concepts
+
+| Term | Description |
+|---|---|
+| **stdout/stderr** | Kubernetes captures container stdout and stderr as logs |
+| **Container Runtime** | Logs stored by container runtime (containerd) on the node |
+| **Log Rotation** | Node-level log rotation applies — very old logs may not be available |
+| **Previous Instance** | When a container restarts, old logs accessible via `--previous` |
+| **Label Selector** | Kubernetes labels allow targeting multiple pods in one command |
+
+---
+
+---
+
+# STEP 1 — Single Container Pod
+
+## YAML
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  containers:
+    - name: app-container
+      image: nginx:1.25
+      ports:
+        - containerPort: 80
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "250m"
+        limits:
+          memory: "128Mi"
+          cpu: "500m"
+```
+
+## Apply
+```bash
+kubectl apply -f 01-single-pod.yaml
+kubectl get pod my-pod
+```
+
+## View Logs
+```bash
+# All logs
+kubectl logs my-pod
+
+# With namespace
+kubectl logs my-pod -n my-namespace
+
+# With timestamps
+kubectl logs my-pod --timestamps=true
+```
+
+## Cleanup
+```bash
+kubectl delete -f 01-single-pod.yaml
+```
+
+---
+
+---
+
+# STEP 2 — Stream Logs (Follow Mode)
+
+## YAML
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  containers:
+    - name: app-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          while true; do
+            echo "[app] $(date) - request processed"
+            sleep 3
+          done
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+```
+
+## Apply
+```bash
+kubectl apply -f 02-stream-pod.yaml
+kubectl get pod my-pod
+```
+
+## Stream Logs
+```bash
+# Follow live output
+kubectl logs -f my-pod
+
+# Follow with namespace
+kubectl logs -f my-pod -n my-namespace
+
+# Follow with timestamps
+kubectl logs -f my-pod --timestamps=true
+```
+
+> Use `Ctrl+C` to stop streaming.
+
+## Cleanup
+```bash
+kubectl delete -f 02-stream-pod.yaml
+```
+
+---
+
+---
+
+# STEP 3 — Tail Last N Lines
+
+## YAML
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  containers:
+    - name: app-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          i=1
+          while true; do
+            echo "[app] line $i - $(date)"
+            i=$((i+1))
+            sleep 1
+          done
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+```
+
+## Apply
+```bash
+kubectl apply -f 03-tail-pod.yaml
+kubectl get pod my-pod
+```
+
+## Tail Logs
+```bash
+# Last 50 lines
+kubectl logs my-pod --tail=50
+
+# Last 100 lines
+kubectl logs my-pod --tail=100
+
+# Stream from last 50 lines
+kubectl logs -f my-pod --tail=50
+
+# Last 30 minutes of logs
+kubectl logs my-pod --since=30m
+
+# Last 1 hour with timestamps
+kubectl logs my-pod --since=1h --timestamps=true
+```
+
+## Cleanup
+```bash
+kubectl delete -f 03-tail-pod.yaml
+```
+
+---
+
+---
+
+# STEP 4 — Previous Container Logs (CrashLoopBackOff)
+
+## YAML
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crash-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  restartPolicy: Always
+  containers:
+    - name: crash-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "App starting..."
+          sleep 5
+          echo "ERROR: Simulated crash! Exiting with code 1"
+          exit 1
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+```
+
+## Apply
+```bash
+kubectl apply -f 04-crash-pod.yaml
+
+# Watch it crash and restart
+kubectl get pod crash-pod -w
+```
+
+## Previous Logs
+```bash
+# Current instance logs
+kubectl logs crash-pod
+
+# Previously crashed instance logs
+kubectl logs crash-pod --previous
+
+# Last 50 lines of crashed instance
+kubectl logs crash-pod --previous --tail=50
+
+# With timestamps
+kubectl logs crash-pod --previous --timestamps=true
+```
+
+## Cleanup
+```bash
+kubectl delete -f 04-crash-pod.yaml
+```
+
+---
+
+---
+
+# STEP 5 — Multi-Container Pod (App + Sidecar)
+
+## YAML
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: multi-container-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  containers:
+    - name: app-container
+      image: nginx:1.25
+      ports:
+        - containerPort: 80
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "250m"
+        limits:
+          memory: "128Mi"
+          cpu: "500m"
+
+    - name: sidecar-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          while true; do
+            echo "[sidecar] $(date) - heartbeat ok"
+            sleep 10
+          done
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+```
+
+## Apply
+```bash
+kubectl apply -f 05-multi-container-pod.yaml
+kubectl get pod multi-container-pod
+```
+
+## List Containers First
+```bash
+kubectl get pod multi-container-pod -o jsonpath='{.spec.containers[*].name}'
+```
+
+## Logs Per Container
+```bash
+# App container
+kubectl logs multi-container-pod -c app-container
+
+# Sidecar container
+kubectl logs multi-container-pod -c sidecar-container
+
+# Stream sidecar
+kubectl logs -f multi-container-pod -c sidecar-container
+
+# Tail app container
+kubectl logs multi-container-pod -c app-container --tail=50
+```
+
+## Cleanup
+```bash
+kubectl delete -f 05-multi-container-pod.yaml
+```
+
+---
+
+---
+
+# STEP 6 — Pod with Init Container
+
+## YAML
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  initContainers:
+    - name: init-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "Init: checking dependencies..."
+          sleep 5
+          echo "Init: all checks passed. Starting main container."
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+
+  containers:
+    - name: app-container
+      image: nginx:1.25
+      ports:
+        - containerPort: 80
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "250m"
+        limits:
+          memory: "128Mi"
+          cpu: "500m"
+```
+
+## Apply
+```bash
+kubectl apply -f 06-init-pod.yaml
+
+# Watch pod transition through Init phase
+kubectl get pod init-pod -w
+```
+
+## Logs
+```bash
+# Init container logs (during or after init phase)
+kubectl logs init-pod -c init-container
+
+# App container logs (after init completes)
+kubectl logs init-pod -c app-container
+```
+
+## Cleanup
+```bash
+kubectl delete -f 06-init-pod.yaml
+```
+
+---
+
+---
+
+# STEP 7 — All Pods in Deployment (Label Selector)
+
+## YAML
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app-deployment
+  labels:
+    app: my-app
+    env: dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+        env: dev
+    spec:
+      containers:
+        - name: app-container
+          image: busybox:1.35
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                echo "[$(hostname)] $(date) - request ok"
+                sleep 5
+              done
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "100m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+```
+
+## Apply
+```bash
+kubectl apply -f 07-deployment.yaml
+
+# Verify all 3 pods running
+kubectl get pods -l app=my-app
+```
+
+## Logs — All Pods
+```bash
+# All pods at once
+kubectl logs -l app=my-app --all-containers=true
+
+# With prefix — shows which pod each line came from
+kubectl logs -l app=my-app --all-containers=true --prefix=true
+
+# Full streaming with timestamps
+kubectl logs -f -l app=my-app --all-containers=true --prefix=true --timestamps=true
+
+# Tail last 20 lines from all pods
+kubectl logs -l app=my-app --all-containers=true --tail=20 --prefix=true
+```
+
+## Cleanup
+```bash
+kubectl delete -f 07-deployment.yaml
+```
+
+---
+
+---
+
+# STEP 8 — All-in-One Lab File
+
+## YAML (apply everything at once)
+
+```yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  containers:
+    - name: app-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          while true; do
+            echo "[my-pod] $(date) - running"
+            sleep 5
+          done
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: multi-container-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  containers:
+    - name: app-container
+      image: nginx:1.25
+      ports:
+        - containerPort: 80
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "250m"
+        limits:
+          memory: "128Mi"
+          cpu: "500m"
+    - name: sidecar-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          while true; do
+            echo "[sidecar] $(date) - heartbeat ok"
+            sleep 10
+          done
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crash-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  restartPolicy: Always
+  containers:
+    - name: crash-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "App starting..."
+          sleep 5
+          echo "ERROR: Simulated crash!"
+          exit 1
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-pod
+  labels:
+    app: my-app
+    env: dev
+spec:
+  initContainers:
+    - name: init-container
+      image: busybox:1.35
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "Init: checking dependencies..."
+          sleep 5
+          echo "Init: all checks passed."
+      resources:
+        requests:
+          memory: "32Mi"
+          cpu: "100m"
+        limits:
+          memory: "64Mi"
+          cpu: "200m"
+  containers:
+    - name: app-container
+      image: nginx:1.25
+      ports:
+        - containerPort: 80
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "250m"
+        limits:
+          memory: "128Mi"
+          cpu: "500m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app-deployment
+  labels:
+    app: my-app
+    env: dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+        env: dev
+    spec:
+      containers:
+        - name: app-container
+          image: busybox:1.35
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                echo "[$(hostname)] $(date) - request ok"
+                sleep 5
+              done
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "100m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+```
+
+## Apply All
+```bash
+kubectl apply -f 08-all-in-one.yaml
+
+# Check all pods
+kubectl get pods -l env=dev
+```
+
+## Full Lab Test Sequence
+```bash
+# 1. Single pod logs
+kubectl logs my-pod
+kubectl logs -f my-pod
+
+# 2. Crash pod - wait for restart then check previous
+kubectl get pod crash-pod -w
+kubectl logs crash-pod --previous
+
+# 3. Multi-container pod
+kubectl get pod multi-container-pod -o jsonpath='{.spec.containers[*].name}'
+kubectl logs multi-container-pod -c app-container
+kubectl logs multi-container-pod -c sidecar-container
+
+# 4. Init pod
+kubectl logs init-pod -c init-container
+kubectl logs init-pod -c app-container
+
+# 5. Deployment - all pods
+kubectl get pods -l app=my-app
+kubectl logs -l app=my-app --all-containers=true --prefix=true
+kubectl logs -f -l app=my-app --all-containers=true --prefix=true --timestamps=true
+```
+
+## Cleanup All
+```bash
+kubectl delete -f 08-all-in-one.yaml
+```
+
+---
+
+---
+
+# Flags Cheat Sheet
+
+| Flag | Description | Example |
+|---|---|---|
+| `-f` | Stream / follow live output | `kubectl logs -f my-pod` |
+| `--tail=N` | Show last N lines only | `--tail=50` |
+| `--previous` | Logs from previous crashed instance | `kubectl logs my-pod --previous` |
+| `-c` | Target specific container | `-c sidecar-container` |
+| `-l` | Label selector — multiple pods | `-l app=my-app` |
+| `--all-containers=true` | All containers across matched pods | combined with `-l` |
+| `--prefix=true` | Prefix each line with pod/container name | combined with `-l` |
+| `--since=Xm` | Logs since duration | `--since=30m` |
+| `--timestamps=true` | Include timestamp on each line | `--timestamps=true` |
+| `--limit-bytes=N` | Cap output size in bytes | `--limit-bytes=1048576` |
+| `-n` | Target namespace | `-n production` |
+
+---
+
+# Save Logs to File
+
+```bash
+# Single pod
+kubectl logs my-pod > my-pod-logs.txt
+
+# Previous crashed instance
+kubectl logs my-pod --previous > crashed-logs.txt
+
+# All pods in deployment
+kubectl logs -l app=my-app --all-containers=true --prefix=true > deployment-logs.txt
+
+# With timestamps
+kubectl logs my-pod --timestamps=true > my-pod-timestamped.txt
+```
+
+---
+
+# Filter Logs
+
+```bash
+# Linux / Mac
+kubectl logs my-pod | grep -i "error\|exception\|fatal"
+
+# Windows PowerShell
+kubectl logs my-pod | Select-String -Pattern "error|exception"
+
+# Grep and save
+kubectl logs my-pod | grep -i "error" > errors.txt
+```
+
+---
+
+# Beyond kubectl — Production Tools
+
+| Tool | Use Case |
+|---|---|
+| **stern** | Multi-pod log tailing with color-coded output and regex filtering |
+| **kubetail** | Bash script to tail multiple pods by name prefix |
+| **Loki + Grafana** | Production log aggregation, querying, dashboarding |
+| **EFK Stack** | Elasticsearch + Fluentd + Kibana — enterprise log pipeline |
+| **Azure Monitor** | Managed log aggregation for AKS with Log Analytics |
+| **CloudWatch** | Managed log aggregation for EKS on AWS |
+
+```bash
+# stern — tail all pods matching name pattern
+stern my-app --namespace production --since 15m
+
+# stern — with regex filter
+stern my-app --include="error|exception" --since 1h
+```
+
+---
+
+# Debugging Decision Flow
+
+```
+Pod not running?
+  └── kubectl describe pod my-pod          ← check Events section
+
+Pod running but misbehaving?
+  └── kubectl logs my-pod                  ← current logs
+
+Pod crashed and restarted?
+  └── kubectl logs my-pod --previous       ← previous instance
+
+Multi-container pod?
+  └── kubectl get pod my-pod \
+        -o jsonpath='{.spec.containers[*].name}'
+  └── kubectl logs my-pod -c <container>
+
+Multi-pod deployment issue?
+  └── kubectl logs -l app=my-app \
+        --all-containers=true --prefix=true
+```
+
+---
+
+## Conclusion
+
+> Log access is the **first step** in any debugging session. Master `kubectl logs` basics first, then layer on `stern` or a full log aggregation stack for production-grade observability.
+
+**Debugging priority order:**
+1. Pod not running → `kubectl describe pod my-pod` → check **Events**
+2. Pod running but misbehaving → `kubectl logs my-pod`
+3. Pod crashed and restarted → `kubectl logs my-pod --previous`
+4. Multi-container pod → `kubectl logs my-pod -c <container-name>`
+5. Multi-pod deployment issue → `kubectl logs -l app=my-app --all-containers=true --prefix=true`

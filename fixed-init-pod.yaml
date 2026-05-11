@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fixed-init
+spec:
+  containers:
+  - name: main-app
+    image: nginx
+  initContainers:
+  - name: init-success
+    image: busybox
+    command: ['sh', '-c', 'echo "Checking DB connection... Success!"; exit 0']
